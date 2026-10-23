@@ -38,6 +38,7 @@ h1,h2,p{margin:0}
 h2{font-size:15px;font-weight:600;color:var(--muted);margin:0 0 8px}
 button,input{font:inherit;color:inherit}
 button{cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
 :focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:8px}
 
 .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:22px}
@@ -57,6 +58,8 @@ button{cursor:pointer}
 @keyframes bump{40%{transform:scale(.96)}}
 
 .card{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:16px}
+.card.note{border-color:var(--accent)}
+.card.note p{margin-bottom:12px}
 .amount{display:flex;align-items:center;gap:10px;border-bottom:2px solid var(--line);padding-bottom:6px;margin-bottom:12px}
 .amount:focus-within{border-color:var(--accent)}
 .amount span{color:var(--muted);font-weight:600}
@@ -73,7 +76,7 @@ button{cursor:pointer}
 .list .what{flex:1;min-width:0}
 .list .what b{display:block;font-weight:600}
 .list .what span{color:var(--muted);font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
-.list time{color:var(--muted);font-size:14px}
+.list time{color:var(--muted);font-size:14px;text-align:right}
 .del{border:0;background:none;color:var(--muted);font-size:22px;line-height:1;padding:4px 6px;border-radius:8px}
 .empty{color:var(--muted);font-size:15px}
 
@@ -86,20 +89,19 @@ button{cursor:pointer}
 .row b{font-size:22px}
 .hint{color:var(--muted);font-size:14px;margin-top:10px}
 .editor{margin-top:14px}
-.editor .btns{display:flex;gap:10px;flex-wrap:wrap}
-.editor .btns .primary{flex:1;width:auto}
+.btns{display:flex;gap:10px;flex-wrap:wrap}
+.btns .primary{flex:1;width:auto}
 
 .tabs{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--line);
   display:flex;justify-content:center;gap:8px;padding:10px 16px calc(10px + env(safe-area-inset-bottom,0px))}
 .tabs button{flex:1;max-width:200px;border:0;background:none;border-radius:12px;padding:12px;font-weight:600;color:var(--muted)}
 .tabs button[aria-current="page"]{background:var(--bg);color:var(--ink)}
 
-.login{min-height:80vh;display:flex;flex-direction:column;justify-content:center}
-.login h1{font-size:48px;font-weight:800;letter-spacing:-.03em;line-height:1}
-.login .tag{color:var(--muted);margin:10px 0 28px;font-size:17px}
-.login label{display:block;font-weight:600;margin-bottom:6px}
+.center{min-height:80vh;display:flex;flex-direction:column;justify-content:center}
+.center h1{font-size:48px;font-weight:800;letter-spacing:-.03em;line-height:1}
+.tag{color:var(--muted);margin:10px 0 28px;font-size:17px}
+label{display:block;font-weight:600;margin-bottom:6px}
 .fine{color:var(--muted);font-size:13px;margin-top:14px}
-.profiles{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -110,62 +112,136 @@ button{cursor:pointer}
   <button data-tab="hand">In hand</button>
 </nav>
 
-<script>
-const CUR = 'dailyspend:current', USERS = 'dailyspend:users';
-const userKey = u => 'dailyspend:user:' + u.toLowerCase();
-let user = null, data = null, tab = 'today', editingLimit = false, lastDay = dayStr(), bump = false;
+<script type="module">
+// ===================== PASTE YOUR FIREBASE CONFIG HERE =====================
+const firebaseConfig = {
+  apiKey: "AIzaSyC2NSMdpNp0inuIxB3WdeAw5Xzkm3UP14o",
+  authDomain: "daily-spend-11e67.firebaseapp.com",
+  projectId: "daily-spend-11e67",
+  storageBucket: "daily-spend-11e67.firebasestorage.app",
+  messagingSenderId: "1064647211023",
+  appId: "1:1064647211023:web:5efd244d79933cbfe80b7a"
+};
+// ===========================================================================
+const FAMILY = 'family';                 // everyone shares this one budget
+const EMAIL_DOMAIN = '@dailyspend.app';  // username "sudeepa" logs in as sudeepa@dailyspend.app
 
-function read(k){ try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } }
-function write(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch(e){ alert('Could not save. Make sure this browser allows site storage.'); return false; } }
-function save(){ write(userKey(user), data); }
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager,
+  doc, collection, onSnapshot, addDoc, deleteDoc, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const configured = !String(firebaseConfig.apiKey).startsWith('PASTE');
+let auth, db, famRef, entriesRef;
+let me = null, authReady = false, entries = [], limit = null, limitBy = null;
+let loaded = { fam: false, ent: false }, unsub = [], loadError = '';
+let tab = 'today', editingLimit = false, bump = false, lastDay = dayStr(), loginErr = '', busy = false;
 
 function dayStr(d = new Date()){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
 const fmt = n => new Intl.NumberFormat('en-LK', { maximumFractionDigits: 2 }).format(n);
 const money = n => 'LKR ' + fmt(n);
-const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function parseAmt(v){ const n = parseFloat(String(v).replace(/,/g,'')); return isFinite(n) && n > 0 ? Math.round(n*100)/100 : null; }
+function readLocal(k){ try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } }
+function writeLocal(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+const saveFail = e => alert('Could not save: ' + (e.code === 'permission-denied' ? 'this account is not allowed. Check your Firestore rules.' : e.message));
 
-function login(name){
-  name = name.trim(); if(!name) return;
-  user = name;
-  data = read(userKey(name)) || { incomes: [], expenses: [], limit: null };
-  const users = read(USERS) || [];
-  if(!users.some(u => u.toLowerCase() === name.toLowerCase())) users.push(name);
-  write(USERS, users); write(CUR, name); save();
-  tab = 'today'; render();
+if(configured){
+  const app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  try { db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) }); }
+  catch(e){ db = getFirestore(app); }
+  famRef = doc(db, 'families', FAMILY);
+  entriesRef = collection(db, 'families', FAMILY, 'entries');
+
+  onAuthStateChanged(auth, u => {
+    unsub.forEach(f => f()); unsub = [];
+    authReady = true;
+    me = u ? u.email.split('@')[0] : null;
+    entries = []; limit = null; limitBy = null; loaded = { fam: false, ent: false }; loadError = '';
+    if(u){
+      unsub.push(onSnapshot(famRef, s => {
+        const d = s.data() || {}; limit = d.limit ?? null; limitBy = d.limitBy || null; loaded.fam = true; render();
+      }, onLoadErr));
+      unsub.push(onSnapshot(entriesRef, s => {
+        entries = s.docs.map(d => ({ id: d.id, ...d.data() })); loaded.ent = true; render();
+      }, onLoadErr));
+    }
+    render();
+  });
 }
-function logout(){ try { localStorage.removeItem(CUR); } catch(e){} user = null; data = null; render(); }
+function onLoadErr(e){
+  loadError = e.code === 'permission-denied'
+    ? 'This account can’t open the family budget yet. Check that its email is listed in your Firestore rules.'
+    : 'Couldn’t load the family budget: ' + e.message;
+  render();
+}
 
 function totals(){
   const t = dayStr(), month = t.slice(0,7);
-  const sum = arr => arr.reduce((s,x) => s + x.amount, 0);
-  const todays = data.expenses.filter(x => x.date === t).sort((a,b) => b.ts - a.ts);
+  const sum = arr => arr.reduce((s,x) => s + (x.amount || 0), 0);
+  const spends = entries.filter(x => x.type === 'spend'), adds = entries.filter(x => x.type === 'add');
+  const todays = spends.filter(x => x.date === t).sort((a,b) => b.ts - a.ts);
   const spentToday = sum(todays);
-  const inHand = sum(data.incomes) - sum(data.expenses);
+  const inHand = sum(adds) - sum(spends);
   const now = new Date();
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
-  const daysLeft = daysInMonth - now.getDate() + 1;
-  const suggested = Math.max(0, Math.floor((inHand + spentToday) / daysLeft));
+  const daysLeft = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate() - now.getDate() + 1;
   return {
-    todays, spentToday, inHand, daysLeft, suggested,
-    monthAdded: sum(data.incomes.filter(x => x.date.startsWith(month))),
-    monthSpent: sum(data.expenses.filter(x => x.date.startsWith(month)))
+    todays, spentToday, inHand, daysLeft, adds: adds.sort((a,b) => b.ts - a.ts),
+    suggested: Math.max(0, Math.floor((inHand + spentToday) / daysLeft)),
+    monthAdded: sum(adds.filter(x => x.date.startsWith(month))),
+    monthSpent: sum(spends.filter(x => x.date.startsWith(month)))
   };
 }
 
+// Data saved on this phone by the earlier one-phone version of the app
+function oldLocalData(){
+  if(!me) return null;
+  const d = readLocal('dailyspend:user:' + me);
+  if(!d || d.imported || !((d.incomes || []).length || (d.expenses || []).length)) return null;
+  return d;
+}
+function importOld(){
+  const d = oldLocalData(); if(!d) return;
+  const b = writeBatch(db);
+  (d.incomes || []).forEach(x => b.set(doc(entriesRef), { type:'add', amount:x.amount, note:x.note || '', date:x.date, ts:x.ts, by:me }));
+  (d.expenses || []).forEach(x => b.set(doc(entriesRef), { type:'spend', amount:x.amount, note:x.note || '', date:x.date, ts:x.ts, by:me }));
+  if(limit == null && d.limit) b.set(famRef, { limit:d.limit, limitBy:me, limitAt:Date.now() }, { merge:true });
+  b.commit().catch(saveFail);
+  d.imported = true; writeLocal('dailyspend:user:' + me, d);
+  render();
+}
+function skipOld(){ const d = oldLocalData(); if(d){ d.imported = true; writeLocal('dailyspend:user:' + me, d); } render(); }
+
 function header(title){
   return `<header class="top"><div class="date">${title}</div>
-    <button class="link" data-act="logout">${esc(user)}, switch user</button></header>`;
+    <button class="link" data-act="logout">${esc(me)}, log out</button></header>`;
+}
+function whoWhen(x, withDate){
+  const when = withDate
+    ? new Date(x.ts).toLocaleDateString('en-GB', { day:'numeric', month:'short' })
+    : new Date(x.ts).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+  return `${when}<br>${esc(x.by)}`;
+}
+function itemList(items, kind, withDate){
+  return `<ul class="list">${items.map(x => `
+    <li><div class="what"><b>${money(x.amount)}</b>${x.note ? `<span>${esc(x.note)}</span>` : ''}</div>
+      <time>${whoWhen(x, withDate)}</time>
+      <button class="del" data-del="${x.id}" data-kind="${kind}" aria-label="Delete this entry">×</button></li>`).join('')}</ul>`;
 }
 
 function todayView(){
-  const t = totals(), lim = data.limit;
+  const t = totals(), lim = limit;
   const dateLabel = new Date().toLocaleDateString('en-GB', { weekday:'long', day:'numeric', month:'long' });
+  const old = oldLocalData();
+  const importCard = old ? `<section class="card note">
+    <p>This phone has entries you saved before the app was shared. Move them into the family budget?</p>
+    <div class="btns"><button class="primary" data-act="importOld">Move my entries</button>
+    <button class="ghost" data-act="skipOld">Leave them</button></div></section>` : '';
   let hero;
   if(lim == null){
     hero = `<section class="hero"><p class="lead">Set a daily limit to start</p>
-      <p class="sub">Pick an amount below. You can change it any time.</p></section>`;
+      <p class="sub">Pick an amount below. Anyone in the family can change it.</p></section>`;
   } else {
     const left = lim - t.spentToday, over = left < 0;
     const pct = lim > 0 ? Math.max(0, Math.min(100, left / lim * 100)) : 0;
@@ -182,16 +258,10 @@ function todayView(){
       <p class="err" id="spendErr" hidden>Enter an amount above zero.</p>
       <button class="primary">Add spend</button>
     </form>`;
-  const list = lim == null ? '' : `
-    <section class="card"><h2>Today’s spending</h2>
-      ${t.todays.length ? `<ul class="list">${t.todays.map(x => `
-        <li><div class="what"><b>${money(x.amount)}</b>${x.note ? `<span>${esc(x.note)}</span>` : ''}</div>
-          <time>${new Date(x.ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</time>
-          <button class="del" data-del-exp="${x.id}" aria-label="Delete this spend">×</button></li>`).join('')}</ul>`
-        : `<p class="empty">Nothing spent yet today.</p>`}
-    </section>`;
+  const list = lim == null ? '' : `<section class="card"><h2>Today’s spending</h2>
+    ${t.todays.length ? itemList(t.todays, 'spend', false) : `<p class="empty">Nothing spent yet today.</p>`}</section>`;
   const hint = t.inHand + t.spentToday > 0
-    ? `Suggested: ${money(t.suggested)} a day. That spreads what you have in hand over the ${t.daysLeft} day${t.daysLeft>1?'s':''} left this month.`
+    ? `Suggested: ${money(t.suggested)} a day. That spreads what you have in hand over the ${t.daysLeft} day${t.daysLeft > 1 ? 's' : ''} left this month.`
     : `Add money on the In hand screen to get a suggested limit.`;
   const editor = (editingLimit || lim == null) ? `
     <form class="editor" id="limitForm" novalidate>
@@ -201,13 +271,13 @@ function todayView(){
         ${t.suggested > 0 ? `<button type="button" class="ghost" data-act="useSuggested">Use ${money(t.suggested)}</button>` : ''}
         ${lim != null ? `<button type="button" class="ghost" data-act="cancelLimit">Cancel</button>` : ''}</div>
     </form>` : '';
-  return header(dateLabel) + hero + spendForm + list + `
+  return header(dateLabel) + importCard + hero + spendForm + list + `
     <section class="facts">
       <div><span>In hand</span><b class="${t.inHand < 0 ? 'bad' : ''}">${money(t.inHand)}</b></div>
       <div><span>Days left this month</span><b>${t.daysLeft}</b></div>
     </section>
     <section class="card">
-      <div class="row"><div><span>Daily limit</span><b>${lim == null ? 'Not set' : money(lim)}</b></div>
+      <div class="row"><div><span>Daily limit${lim != null && limitBy ? `, set by ${esc(limitBy)}` : ''}</span><b>${lim == null ? 'Not set' : money(lim)}</b></div>
         ${lim != null && !editingLimit ? `<button class="ghost" data-act="editLimit">Change</button>` : ''}</div>
       <p class="hint">${hint}</p>${editor}
     </section>`;
@@ -215,7 +285,6 @@ function todayView(){
 
 function handView(){
   const t = totals();
-  const items = [...data.incomes].sort((a,b) => b.ts - a.ts);
   return header('In hand') + `
     <section class="hero">
       <p class="lead">In hand now</p>
@@ -229,83 +298,119 @@ function handView(){
       <button class="primary">Add money</button>
     </form>
     <section class="card"><h2>Money added</h2>
-      ${items.length ? `<ul class="list">${items.map(x => `
-        <li><div class="what"><b>${money(x.amount)}</b>${x.note ? `<span>${esc(x.note)}</span>` : ''}</div>
-          <time>${new Date(x.ts).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</time>
-          <button class="del" data-del-inc="${x.id}" aria-label="Delete this entry">×</button></li>`).join('')}</ul>`
-        : `<p class="empty">Add the money you have right now to get started.</p>`}
+      ${t.adds.length ? itemList(t.adds, 'add', true) : `<p class="empty">Add the money you have right now to get started.</p>`}
     </section>`;
 }
 
 function loginView(){
-  const users = read(USERS) || [];
-  return `<main class="login">
+  return `<main class="center">
     <h1>Daily Spend</h1>
-    <p class="tag">Know what you can spend today.</p>
+    <p class="tag">The family’s spending, one shared limit.</p>
     <form id="loginForm">
       <label for="uname">Username</label>
-      <input class="text" id="uname" autocomplete="username" autocapitalize="none" maxlength="30" required>
-      <button class="primary">Continue</button>
+      <input class="text" id="uname" autocomplete="username" autocapitalize="none" autocorrect="off" maxlength="30" required>
+      <label for="pass">Password</label>
+      <input class="text" id="pass" type="password" autocomplete="current-password" required>
+      ${loginErr ? `<p class="err">${esc(loginErr)}</p>` : ''}
+      <button class="primary" ${busy ? 'disabled' : ''}>${busy ? 'Logging in…' : 'Log in'}</button>
     </form>
-    <p class="fine">A new username creates a new profile. Your data is saved in this browser on this device.</p>
-    ${users.length ? `<div class="profiles">${users.map(u => `<button class="ghost" data-user="${esc(u)}">${esc(u)}</button>`).join('')}</div>` : ''}
+    <p class="fine">You stay logged in on this phone until you log out.</p>
   </main>`;
 }
+const msgView = (title, text, withLogout) => `<main class="center"><h1>${title}</h1><p class="tag">${text}</p>
+  ${withLogout ? `<button class="ghost" data-act="logout">Log out</button>` : ''}</main>`;
 
 function render(){
   const app = document.getElementById('app'), tabs = document.getElementById('tabs');
-  if(!user){ app.innerHTML = loginView(); tabs.hidden = true; return; }
-  app.innerHTML = tab === 'today' ? todayView() : handView();
-  tabs.hidden = false;
+  // keep anything half-typed when the other phone's changes arrive
+  const kept = {}; app.querySelectorAll('input[id]').forEach(i => { if(i.value) kept[i.id] = i.value; });
+  const focusId = document.activeElement && document.activeElement.id;
+  let html, showTabs = false;
+  if(!configured) html = msgView('Almost there', 'Paste your Firebase config into index.html, near the top of the script, then upload it to GitHub again.');
+  else if(!authReady) html = msgView('Daily Spend', 'Loading…');
+  else if(!me) html = loginView();
+  else if(loadError) html = msgView('Can’t open the budget', esc(loadError), true);
+  else if(!loaded.fam || !loaded.ent) html = msgView('Daily Spend', 'Loading the family budget…');
+  else { html = tab === 'today' ? todayView() : handView(); showTabs = true; }
+  app.innerHTML = html;
+  tabs.hidden = !showTabs;
   tabs.querySelectorAll('button').forEach(b => {
     if(b.dataset.tab === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
+  Object.entries(kept).forEach(([id, v]) => { const el = document.getElementById(id); if(el) el.value = v; });
+  if(focusId){ const el = document.getElementById(focusId); if(el) el.focus(); }
   bump = false;
 }
 
-document.addEventListener('submit', e => {
+function addEntry(type, amtId, noteId, errId){
+  const amtEl = document.getElementById(amtId), noteEl = document.getElementById(noteId);
+  const amt = parseAmt(amtEl.value);
+  if(!amt){ document.getElementById(errId).hidden = false; return; }
+  const note = noteEl.value.trim();
+  amtEl.value = ''; noteEl.value = ''; amtEl.blur(); noteEl.blur();
+  addDoc(entriesRef, { type, amount: amt, note, date: dayStr(), ts: Date.now(), by: me }).catch(saveFail);
+  if(type === 'spend') bump = true;
+  render();
+}
+
+document.addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target;
-  if(f.id === 'loginForm') return login(document.getElementById('uname').value);
-  if(f.id === 'spendForm'){
-    const amt = parseAmt(document.getElementById('spendAmt').value);
-    if(!amt){ document.getElementById('spendErr').hidden = false; return; }
-    data.expenses.push({ id: uid(), amount: amt, note: document.getElementById('spendNote').value.trim(), date: dayStr(), ts: Date.now() });
-    save(); bump = true; render();
+  if(f.id === 'loginForm'){
+    const name = document.getElementById('uname').value.trim().toLowerCase();
+    const pass = document.getElementById('pass').value;
+    if(!name || !pass) return;
+    busy = true; loginErr = ''; render();
+    try { await signInWithEmailAndPassword(auth, name + EMAIL_DOMAIN, pass); }
+    catch(err){
+      loginErr = err.code === 'auth/network-request-failed' ? 'No internet connection. Try again when you’re online.'
+        : err.code === 'auth/too-many-requests' ? 'Too many tries. Wait a few minutes and try again.'
+        : 'That username or password is wrong.';
+    }
+    busy = false;
+    const p = document.getElementById('pass'); if(p) p.value = '';
+    render();
   }
-  if(f.id === 'incomeForm'){
-    const amt = parseAmt(document.getElementById('incAmt').value);
-    if(!amt){ document.getElementById('incErr').hidden = false; return; }
-    data.incomes.push({ id: uid(), amount: amt, note: document.getElementById('incNote').value.trim(), date: dayStr(), ts: Date.now() });
-    save(); render();
-  }
+  if(f.id === 'spendForm') addEntry('spend', 'spendAmt', 'spendNote', 'spendErr');
+  if(f.id === 'incomeForm') addEntry('add', 'incAmt', 'incNote', 'incErr');
   if(f.id === 'limitForm'){
-    const amt = parseAmt(document.getElementById('limitAmt').value);
+    const el = document.getElementById('limitAmt');
+    const amt = parseAmt(el.value);
     if(!amt){ document.getElementById('limitErr').hidden = false; return; }
-    data.limit = amt; editingLimit = false; save(); render();
+    el.value = ''; el.blur(); editingLimit = false;
+    setDoc(famRef, { limit: amt, limitBy: me, limitAt: Date.now() }, { merge: true }).catch(saveFail);
+    render();
   }
 });
 
 document.addEventListener('click', e => {
   const b = e.target.closest('button'); if(!b) return;
   if(b.dataset.tab){ tab = b.dataset.tab; editingLimit = false; render(); window.scrollTo(0,0); return; }
-  if(b.dataset.user) return login(b.dataset.user);
-  if(b.dataset.delExp && confirm('Delete this spend?')){ data.expenses = data.expenses.filter(x => x.id !== b.dataset.delExp); save(); render(); }
-  if(b.dataset.delInc && confirm('Delete this entry?')){ data.incomes = data.incomes.filter(x => x.id !== b.dataset.delInc); save(); render(); }
+  if(b.dataset.del){
+    if(confirm(b.dataset.kind === 'spend' ? 'Delete this spend?' : 'Delete this entry?'))
+      deleteDoc(doc(entriesRef, b.dataset.del)).catch(saveFail);
+    return;
+  }
   const act = b.dataset.act;
-  if(act === 'logout') logout();
-  if(act === 'editLimit'){ editingLimit = true; render(); document.getElementById('limitAmt')?.focus(); }
-  if(act === 'cancelLimit'){ editingLimit = false; render(); }
-  if(act === 'useSuggested'){ data.limit = totals().suggested; editingLimit = false; save(); render(); }
+  if(act === 'logout'){ signOut(auth); tab = 'today'; }
+  if(act === 'editLimit'){ editingLimit = true; render(); const el = document.getElementById('limitAmt'); if(el){ el.focus(); el.select(); } }
+  if(act === 'cancelLimit'){ editingLimit = false; const el = document.getElementById('limitAmt'); if(el) el.value = ''; render(); }
+  if(act === 'useSuggested'){
+    const s = totals().suggested; editingLimit = false;
+    const el = document.getElementById('limitAmt'); if(el) el.value = '';
+    setDoc(famRef, { limit: s, limitBy: me, limitAt: Date.now() }, { merge: true }).catch(saveFail);
+    render();
+  }
+  if(act === 'importOld') importOld();
+  if(act === 'skipOld') skipOld();
 });
 
-// The day resets automatically; this refreshes the screen if the app is open past midnight.
-function checkDay(){ if(dayStr() !== lastDay){ lastDay = dayStr(); if(user) render(); } }
+// "Today" resets by date on its own; this refreshes the screen if the app stays open past midnight.
+function checkDay(){ if(dayStr() !== lastDay){ lastDay = dayStr(); render(); } }
 setInterval(checkDay, 30000);
 document.addEventListener('visibilitychange', () => { if(!document.hidden) checkDay(); });
 
-const saved = read(CUR);
-if(saved) login(saved); else render();
+render();
 </script>
 </body>
 </html>
